@@ -7,11 +7,13 @@ import os
 import gzip
 import multiprocessing
 import random
+from sympy import false
 from tqdm import tqdm
 from pathlib import Path
 from dedup_solutions import rouge_dedup
 from utils import clean_sol_prompt
 from argparse import ArgumentParser
+from datasets import DatasetDict
 
 pa = ArgumentParser()
 pa.add_argument("--path", type=str, required=True)
@@ -22,12 +24,15 @@ pa.add_argument("--global_dedup", action="store_true")
 pa.add_argument("--global_dedup_prob", type=float, default=0.35,
                 help="the probability that a pair of examples will not be deduplicated, despite being similar. higher results in a more aggressive and slower deduplication.")
 pa.add_argument("--lang", type=str, required=True)
+pa.add_argument("--local_path", type=str, required=True)
 pa.add_argument("--dedup_threshold", type=float, default=0.6)
 pa.add_argument("--score_batch", type=int, default=32)
 pa.add_argument("--processing_batch", type=int, default=512)
 pa.add_argument("--score_device", type=str, default="cpu")
 pa.add_argument("--no_score", action="store_true")
 pa.add_argument("--no_threading", action="store_true")
+pa.add_argument("--push_to_hub", default=False, help="push to hub")
+pa.add_argument("--hf_write_token", type=str, required=False)
 args = pa.parse_args()
 
 num_has_at_least_one_passing = 0
@@ -151,7 +156,10 @@ def process_dedup(tpl: Tuple[List[Solution], str, float]) -> List[Solution]:
     sols_code = rouge_dedup(sols_code, lang, threshold)
     return [code_to_sol[sol] for sol in sols_code]
 
-
+paths = list(Path(args.path).glob("**/*.results.json.gz"))
+print("#################################################################")
+print(f"Found {len(paths)} result files under {args.path}")
+print("################################################################")
 THREADS = os.cpu_count() - 1  # type: ignore
 pool = multiprocessing.Pool(THREADS)
 if args.no_threading:
@@ -252,13 +260,31 @@ new_ds = datasets.Dataset.from_dict(
         "tests": tests,
         "edu_score": edu_scores
     })
-new_ds.push_to_hub(args.name, private=True)
-
-# stats
-print(" #### stats #### ")
-print(f"total solutions: {len(solutions)}")
-print(f"total unique solutions: {len(set(solutions))}")
-print(
-    f"total problems with at least one solution: {num_has_at_least_one_passing}")
-print(f"average edu score: {sum(edu_scores) / len(edu_scores)}")
-print(f"average pass rate: {sum(pass_rates) / len(pass_rates)}")
+if new_ds.num_rows > 0:
+    new_ds.to_json(f"{args.local_path}/{args.name}.json")
+    if args.push_to_hub:
+        new_ds.push_to_hub(
+            repo_id = args.name,
+            split = args.lang,
+            private=True,
+            token=args.hf_write_token
+        )
+    # stats
+    print(" #### stats #### ")
+    print(f"total solutions: {len(solutions)}")
+    print(f"total unique solutions: {len(set(solutions))}")
+    print(
+        f"total problems with at least one solution: {num_has_at_least_one_passing}")
+    # 平均値計算はリストが空でないかチェック
+    if edu_scores:
+        avg_edu = sum(edu_scores) / len(edu_scores)
+        print(f"average edu score: {avg_edu}")
+    else:
+        print("average edu score: N/A (no solutions)")
+    if pass_rates:
+        avg_pass = sum(pass_rates) / len(pass_rates)
+        print(f"average pass rate: {avg_pass}")
+    else:
+        print("average pass rate: N/A (no solutions)")
+else:
+    print(f"No solutions found for {args.name}")
